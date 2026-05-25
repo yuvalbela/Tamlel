@@ -1,0 +1,8 @@
+google-genai
+sounddevice
+scipy
+numpy
+pyperclip
+keyboard
+pystray
+pillow

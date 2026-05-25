@@ -1,0 +1,41 @@
+# --- סודות ומידע אישי ---
+config.py
+API.txt
+*.key
+
+# --- פלטים שמשתנים בכל הרצה ---
+output.txt
+history.txt
+settings.json
+
+# --- אייקון שנוצר אוטומטית ---
+tamlel.ico
+
+# --- קבצי אודיו (לא להעלות הקלטות) ---
+*.wav
+*.mp3
+*.m4a
+*.aac
+*.ogg
+*.flac
+*.aiff
+
+# --- Python ---
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+env/
+*.egg-info/
+build/
+dist/
+
+# --- IDE ---
+.vscode/
+.idea/
+*.swp
+
+# --- תיקיית עבודה זמנית ---
+archive/
