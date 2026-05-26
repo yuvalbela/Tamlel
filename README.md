@@ -13,7 +13,12 @@
 נבדק והוחלט אחרי בדיקות נרחבות שמודלים מקומיים (Whisper + DictaLM) על חומרה
 ישנה (i5 ללא GPU) הם איטיים מדי או לא אמינים. Gemini 2.5 Flash מסוגל לקבל קובץ
 אודיו ולהחזיר תמלול נקי ומדויק בקריאה אחת — בערך 17 שניות לדקת אודיו, כולל
-העלאה. השכבה החינמית של Gemini מספיקה לשימוש אישי (~250 בקשות ביום).
+העלאה.
+
+**מגבלות free tier (2026)**: המכסות החינמיות של Gemini מוגבלות מאוד —
+gemini-2.5-flash מאפשר רק 20 בקשות ליום (RPD=20, RPM=5). הדרך לעקוף את זה
+היא ה-fallback chain: כש-flash נגמר, האפליקציה עוברת אוטומטית ל-
+gemini-3.1-flash-lite (500 בקשות ליום, איכות סבירה).
 
 ## דרישות
 
@@ -104,38 +109,43 @@ Advanced → Run as administrator.
 - `hotkey` — אפשר לערוך ידנית (לדוגמה: `"alt+r"`, `"f9"`, `"ctrl+alt+t"`). הפעל
   מחדש את התוכנה אחרי שינוי.
 - `mode` — ניתן לשנות גם דרך תפריט ה-tray.
+- `models` — שרשרת fallback של מודלי Gemini. ברירת מחדל:
+  `["gemini-2.5-flash", "gemini-3.1-flash-lite"]`. אם הראשון נכשל בגלל quota,
+  המערכת עוברת אוטומטית לבא בתור. ב-free tier מומלץ להשאיר את
+  `gemini-3.1-flash-lite` בסוף השרשרת — הוא היחיד עם 500 RPD (כל השאר מוגבלים
+  ל-20).
 
 ## אייקונים בהתאמה אישית
 
 האפליקציה משתמשת באייקון "t" המצויר. אם תרצה אייקונים משלך, שמור בתיקיית
-הפרויקט שלושה קבצים בגודל 64×64 פיקסלים, רקע שקוף:
+`icons/` קבצים בגודל 64×64 פיקסלים, רקע שקוף:
 
-- `icon_idle.png` — מצב המתנה (ירוק כברירת מחדל)
-- `icon_recording.png` — מקליט (אדום)
-- `icon_processing.png` — מעבד (צהוב)
+- `icons/icon_idle.png` — מצב המתנה (ירוק כברירת מחדל)
+- `icons/icon_recording.png` — מקליט (אדום)
+- `icons/icon_processing.png` — מעבד (צהוב)
+- `icons/icon_error.png` — שגיאה (כתום)
 
-לקיצור על שולחן העבודה, ייצר קובץ `.ico` מולטי-רזולוציה:
-
-```bash
-python make_app_icon.py
-```
-
-ייצור `tamlel.ico` עם 6 רזולוציות. לחבר את הקיצור: לחץ ימני על קיצור Tamlel
-בשולחן העבודה → Properties → Change Icon → Browse לקובץ.
+לקיצור על שולחן העבודה, צור קובץ ICO מולטי-רזולוציה משלך (למשל באתר
+[icoconvert.com](https://icoconvert.com)) ושמור אותו כ-`icons/icon.ico`.
+לחבר את הקיצור: לחץ ימני על קיצור Tamlel בשולחן העבודה → Properties →
+Change Icon → Browse לקובץ `icons/icon.ico`.
 
 ## מבנה הקבצים
 
 ```
-transcribe.py        ליבת התמלול + מצב CLI
-tray_app.py          אפליקציית tray + hotkey גלובלי
-make_app_icon.py     סקריפט לייצור tamlel.ico
-Tamlel.bat           משגר ללא חלון CMD
-config.example.py    תבנית למפתח API
-requirements.txt     ספריות Python נדרשות
-settings.json        הגדרות משתמש (נוצר אוטומטית, לא ב-git)
-config.py            המפתח שלך (לא ב-git!)
-history.txt          יומן תמלולים (לא ב-git)
-output.txt           התמלול האחרון (לא ב-git)
+transcribe.py            ליבת התמלול + מצב CLI
+tray_app.py              אפליקציית tray + hotkey גלובלי
+overlay.py               חלון ה-pill הצף עם ויזואליזציית קול
+Tamlel.bat               משגר ללא חלון CMD
+config.example.py        תבנית למפתח API
+requirements.txt         ספריות Python נדרשות
+icons/                   אייקונים לאפליקציה (PNG ל-tray, ICO לקיצור)
+settings.json            הגדרות משתמש (נוצר אוטומטית, לא ב-git)
+config.py                המפתח שלך (לא ב-git!)
+history.txt              יומן תמלולים (לא ב-git)
+output.txt               התמלול האחרון (לא ב-git)
+app.log                  לוג ריצה (לא ב-git)
+failed_recordings/       WAV של הקלטות שנכשלו (לא ב-git)
 ```
 
 ## פרטיות

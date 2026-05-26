@@ -22,10 +22,21 @@ except ImportError:
     print('GEMINI_API_KEY = "your-key-here"')
     sys.exit(1)
 
-MODEL = "gemini-2.5-flash"
+# רשימת ברירת מחדל ל-fallback chain.
+# מגבלות free tier (2026): מודלי "flash" איכותיים מוגבלים ל-20 RPD כל אחד.
+# הסדר: מהחדש ביותר (סטטיסטית - איכותי יותר) ליציב המוכר, ואז ל-lite לכמויות.
+# סה"כ 60 בקשות איכותיות + 500 lite = 560 ביום.
+DEFAULT_MODELS = [
+    "gemini-3.5-flash",      # 20 RPD, הכי חדש
+    "gemini-3.0-flash",      # 20 RPD
+    "gemini-2.5-flash",      # 20 RPD, יציב ומוכח
+    "gemini-3.1-flash-lite", # 500 RPD, איכות סבירה (workhorse לכמויות)
+]
+# המודל הראשון בשרשרת - נקודת התחלה כברירת מחדל ל-transcribe_audio()
+MODEL = DEFAULT_MODELS[0]
+
 OUTPUT_FILE = "output.txt"
 HISTORY_FILE = "history.txt"
-DAILY_LIMIT = 250  # מכסה משוערת של Gemini 2.5 Flash בשכבה החינמית
 SAMPLE_RATE = 16000  # 16kHz - מספיק לדיבור, קובץ קטן
 
 PROMPT = """תמלל את קובץ האודיו המצורף לעברית. האודיו הוא דיבור חופשי בעברית.
@@ -37,7 +48,12 @@ PROMPT = """תמלל את קובץ האודיו המצורף לעברית. הא�
 
 חשוב: שמור בדיוק על המשמעות והתוכן של הדובר. אל תוסיף מידע, רעיונות או דעות שלא נאמרו, ואל תהפוך משמעות של אף משפט. תקן ניסוח - אל תמציא תוכן.
 
-החזר רק את הטקסט הסופי הנקי, בלי הקדמות והערות."""
+החזר רק את הטקסט הסופי הנקי, בלי הקדמות והערות.
+
+חוקים נוקשים שאסור להפר:
+- אם האודיו שקט, ריק, לא ברור, או קצר מדי לתמלול — החזר מחרוזת ריקה לחלוטין (בלי שום תו).
+- לעולם אל תכתוב התנצלויות כמו "אני מצטער", "I'm sorry", "לא צורף קובץ", "no audio file", או כל הסבר על מגבלות.
+- לעולם אל תכתוב תשובת מטא או הסבר על מה שעשית/לא עשית - רק התמלול הסופי או מחרוזת ריקה."""
 
 MIME_TYPES = {
     ".mp3": "audio/mp3",
@@ -49,11 +65,48 @@ MIME_TYPES = {
     ".aiff": "audio/aiff",
 }
 
+# טקסטים אופייניים ל-hallucination של Gemini כשהוא מקבל אודיו קצר/שקט
+# ומתפלא ועונה כאילו לא קיבל קובץ. אנחנו מזהים את אלה ומתייחסים אליהם כשגיאה.
+HALLUCINATION_PATTERNS = [
+    # עברית
+    "אני מצטער",
+    "לא צורף",
+    "לא קיבלתי",
+    "לא נשלח",
+    "אין באפשרותי",
+    "לא יכול לתמלל",
+    "לא נמצא קובץ",
+    "לא ניתן לעבד",
+    # אנגלית
+    "i'm sorry",
+    "i am sorry",
+    "no audio",
+    "no file was",
+    "no audio file",
+    "didn't receive",
+    "did not receive",
+    "couldn't process",
+    "could not process",
+    "i cannot transcribe",
+    "i can't transcribe",
+]
 
-def record_until_event(stop_event, on_status=print):
+
+def _looks_like_hallucination(text):
+    """בודק אם תשובת המודל נראית כמו מטא-תגובה ולא כמו תמלול אמיתי."""
+    if not text:
+        return False
+    head = text.lower().strip()[:200]
+    return any(p in head for p in HALLUCINATION_PATTERNS)
+
+
+def record_until_event(stop_event, on_status=print, on_chunk_rms=None):
     """
     הליבה של ההקלטה: מקליט עד ש-stop_event.set() נקרא.
     משמש גם ל-CLI (כש-Enter קובע) וגם ל-tray (כש-hotkey קובע).
+
+    on_chunk_rms: callback אופציונלי שמקבל float עם ה-RMS של כל chunk אודיו
+    תוך כדי הקלטה. שימושי לויזואליזציה בזמן אמת (overlay).
 
     מחזיר dict: {"path": <wav>, "duration": float, "rms": float} או None אם אין אודיו.
     """
@@ -72,6 +125,12 @@ def record_until_event(stop_event, on_status=print):
         if status:
             on_status(f"  (audio status: {status})")
         frames.append(indata.copy())
+        if on_chunk_rms is not None:
+            try:
+                chunk_rms = float(np.sqrt(np.mean(indata.astype(np.float32) ** 2)))
+                on_chunk_rms(chunk_rms)
+            except Exception:
+                pass  # ויזואליזציה לא צריכה להפיל הקלטה
 
     start = time.time()
     with sd.InputStream(samplerate=SAMPLE_RATE, channels=1, dtype="int16",
@@ -126,31 +185,100 @@ def record_audio():
     return result["path"]
 
 
-def transcribe_audio(audio_path):
+# ---------- היררכיית שגיאות תמלול ----------
+class TranscriptionError(Exception):
+    """שגיאת בסיס לכל שגיאה בתהליך התמלול."""
+
+
+class TranscriptionServerError(TranscriptionError):
+    """5xx מהשרת - שווה לנסות שוב עם backoff (לא נספר בשימוש)."""
+
+
+class TranscriptionRateLimitError(TranscriptionError):
+    """429 rate-limit לדקה - להמתין ולנסות שוב."""
+
+
+class TranscriptionQuotaError(TranscriptionError):
+    """429 quota יומי - לעבור למודל הבא בשרשרת ה-fallback."""
+
+
+class TranscriptionAuthError(TranscriptionError):
+    """401/403 - מפתח שגוי או חסר הרשאות (לא retry)."""
+
+
+class TranscriptionEmptyResponseError(TranscriptionError):
+    """Gemini החזיר תשובה ריקה (אודיו שקט, נחסם, וכד')."""
+
+
+class TranscriptionFatalError(TranscriptionError):
+    """שגיאה אחרת שלא תיפתר מעצמה (לא retry)."""
+
+
+def _classify_429(msg):
+    """
+    מבחין בין 429 יומי (quota - fallback למודל הבא) ל-429 לדקה (rate - retry).
+    Gemini מחזיר את שני הסוגים עם 'Quota exceeded' בהודעה, אז צריך לבדוק את
+    metric: per minute / per day.
+    """
+    if any(s in msg for s in ("per day", "perday", "daily", "rpd", "requests per day")):
+        return "quota"
+    if any(s in msg for s in ("per minute", "perminute", "rpm", "requests per minute")):
+        return "rate"
+    # ברירת מחדל כשלא ברור: rate (יותר בטוח - נעשה retry במקום fallback מיותר)
+    return "rate"
+
+
+def _classify_error(exc):
+    """מסווג חריגה מ-genai לקטגוריית שגיאה. מחזיר אחת מ:
+    'server', 'rate', 'quota', 'auth', 'unknown'."""
+    code = getattr(exc, "code", None) or getattr(exc, "status_code", None)
+    msg = str(exc).lower()
+
+    # סיווג לפי קוד אם קיים
+    if code in (500, 502, 503, 504):
+        return "server"
+    if code == 429:
+        return _classify_429(msg)
+    if code in (401, 403):
+        return "auth"
+
+    # סיווג לפי הודעת השגיאה
+    if any(c in msg for c in ("503", "500", "502", "504", "unavailable", "internal server")):
+        return "server"
+    if "429" in msg or "resource_exhausted" in msg:
+        return _classify_429(msg)
+    if any(s in msg for s in ("401", "403", "unauthorized", "permission denied", "api_key")):
+        return "auth"
+    return "unknown"
+
+
+def transcribe_audio(audio_path, model=MODEL):
     """
     שולח קובץ אודיו ל-Gemini ומחזיר את הטקסט המתומלל.
+    מעלה אחת מ-TranscriptionError במקרה של כשל.
     """
     ext = os.path.splitext(audio_path)[1].lower()
     mime_type = MIME_TYPES.get(ext)
     if mime_type is None:
-        print(f"ERROR: unsupported audio format: {ext}")
-        print(f"Supported: {', '.join(MIME_TYPES.keys())}")
-        sys.exit(1)
+        raise TranscriptionFatalError(
+            f"unsupported audio format: {ext}. "
+            f"Supported: {', '.join(MIME_TYPES.keys())}"
+        )
 
     file_size_mb = os.path.getsize(audio_path) / (1024 * 1024)
-    print(f"Audio file: {audio_path} ({file_size_mb:.1f} MB)")
+    print(f"Audio file: {audio_path} ({file_size_mb:.1f} MB), model: {model}")
 
     try:
         from google import genai
         from google.genai import types
     except ImportError:
-        print("ERROR: google-genai library not installed.")
-        print("Run: pip install google-genai")
-        sys.exit(1)
+        raise TranscriptionFatalError(
+            "google-genai library not installed. Run: pip install google-genai"
+        )
 
     client = genai.Client(api_key=GEMINI_API_KEY)
 
-    print("Sending to Gemini...")
+    print(f"Sending to Gemini ({model})...")
     start = time.time()
 
     try:
@@ -158,7 +286,7 @@ def transcribe_audio(audio_path):
             audio_bytes = f.read()
 
         response = client.models.generate_content(
-            model=MODEL,
+            model=model,
             contents=[
                 PROMPT,
                 types.Part.from_bytes(data=audio_bytes, mime_type=mime_type),
@@ -168,32 +296,140 @@ def transcribe_audio(audio_path):
         result_text = response.text
 
     except Exception as e:
-        print(f"ERROR: request to Gemini failed:")
-        print(f"  {e}")
-        sys.exit(1)
+        category = _classify_error(e)
+        msg = f"{category}: {e}"
+        if category == "server":
+            raise TranscriptionServerError(msg) from e
+        if category == "rate":
+            raise TranscriptionRateLimitError(msg) from e
+        if category == "quota":
+            raise TranscriptionQuotaError(msg) from e
+        if category == "auth":
+            raise TranscriptionAuthError(msg) from e
+        raise TranscriptionFatalError(msg) from e
 
     elapsed = time.time() - start
     print(f"Gemini responded in {elapsed:.1f} seconds.")
 
     if not result_text or not result_text.strip():
-        print("ERROR: Gemini returned an empty response.")
         # מידע דיאגנוסטי כדי להבין למה
+        diag = []
         try:
             if response.candidates:
                 cand = response.candidates[0]
-                print(f"  finish_reason: {cand.finish_reason}")
+                diag.append(f"finish_reason={cand.finish_reason}")
                 if cand.safety_ratings:
-                    print(f"  safety_ratings: {cand.safety_ratings}")
+                    diag.append(f"safety_ratings={cand.safety_ratings}")
             if response.prompt_feedback:
-                print(f"  prompt_feedback: {response.prompt_feedback}")
-        except Exception as diag_err:
-            print(f"  (could not read diagnostics: {diag_err})")
-        sys.exit(1)
+                diag.append(f"prompt_feedback={response.prompt_feedback}")
+        except Exception:
+            pass
+        raise TranscriptionEmptyResponseError(
+            "Gemini returned an empty response" + (f" ({', '.join(diag)})" if diag else "")
+        )
+
+    # זיהוי hallucination - מודל ענה במטא-תגובה במקום בתמלול
+    if _looks_like_hallucination(result_text):
+        snippet = result_text.strip().replace("\n", " ")[:120]
+        raise TranscriptionEmptyResponseError(
+            f"Model returned a meta-response instead of a transcription: {snippet}"
+        )
 
     return result_text.strip()
 
 
+def transcribe_with_fallback(audio_path, models=None,
+                             max_retries_per_model=3,
+                             on_retry=None):
+    """
+    מנסה לתמלל עם retry על שגיאות זמניות, ו-fallback למודל הבא אם quota נגמר.
+
+    on_retry(event_type, model, attempt, exc, wait_sec) - callback לפידבק ויזואלי:
+      event_type ∈ {"retrying", "fallback", "giving_up"}
+
+    מחזיר dict: {"text": <str>, "model_used": <str>}.
+    מעלה TranscriptionError אחרון אם כל הניסיונות נכשלו.
+    """
+    if models is None:
+        models = list(DEFAULT_MODELS)
+
+    last_error = None
+
+    for model_index, model in enumerate(models):
+        is_last_model = (model_index == len(models) - 1)
+
+        for attempt in range(max_retries_per_model):
+            try:
+                text = transcribe_audio(audio_path, model=model)
+                return {"text": text, "model_used": model}
+
+            except TranscriptionServerError as e:
+                last_error = e
+                print(f"  Server error on {model}: {e}")
+                if not is_last_model:
+                    # יש מודל הבא בשרשרת - עוברים אליו מיד במקום לבזבז retries
+                    # על flash שעמוס (זה גם הסיבה העיקרית שנחצה RPM).
+                    next_model = models[model_index + 1]
+                    print(f"  Skipping retries; falling back to: {next_model}")
+                    if on_retry:
+                        on_retry("fallback", next_model, attempt, e, 0)
+                    break
+                # מודל אחרון - retry כ-resort אחרון
+                wait = 2 ** (attempt + 1)  # 2, 4, 8
+                if attempt + 1 < max_retries_per_model:
+                    print(f"  Last model in chain. Retrying in {wait}s... "
+                          f"(attempt {attempt+2}/{max_retries_per_model})")
+                    if on_retry:
+                        on_retry("retrying", model, attempt, e, wait)
+                    time.sleep(wait)
+                    continue
+
+            except TranscriptionRateLimitError as e:
+                last_error = e
+                wait = 30
+                print(f"  Rate limited on {model}: {e}")
+                if attempt + 1 < max_retries_per_model:
+                    print(f"  Waiting {wait}s before retry...")
+                    if on_retry:
+                        on_retry("retrying", model, attempt, e, wait)
+                    time.sleep(wait)
+                    continue
+
+            except TranscriptionQuotaError as e:
+                last_error = e
+                print(f"  Quota exhausted for {model}: {e}")
+                if not is_last_model:
+                    next_model = models[model_index + 1]
+                    print(f"  Falling back to: {next_model}")
+                    if on_retry:
+                        on_retry("fallback", next_model, attempt, e, 0)
+                break  # exit retry loop, go to next model
+
+            except TranscriptionEmptyResponseError as e:
+                # תשובה ריקה או hallucination - לא להפעיל retry על אותו מודל,
+                # אבל כדאי לנסות מודל הבא בשרשרת (אולי הוא יצליח)
+                last_error = e
+                print(f"  Empty/hallucinated response from {model}: {e}")
+                if not is_last_model:
+                    next_model = models[model_index + 1]
+                    print(f"  Falling back to: {next_model}")
+                    if on_retry:
+                        on_retry("fallback", next_model, attempt, e, 0)
+                break
+
+            except TranscriptionError as e:
+                # שגיאות שלא ניתן לפתור (auth, fatal) - מתפשטות מיד
+                if on_retry:
+                    on_retry("giving_up", model, attempt, e, 0)
+                raise
+
+    if on_retry:
+        on_retry("giving_up", models[-1] if models else "?", 0, last_error, 0)
+    raise last_error or TranscriptionFatalError("All transcription attempts failed")
+
+
 def save_output(text):
+    """שומר את התמלול האחרון לקובץ output.txt (UTF-8, דורס כל פעם)."""
     with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
         f.write(text + "\n")
     print(f"Result saved to: {OUTPUT_FILE}")
@@ -220,12 +456,13 @@ def count_today_usage():
 
 
 def append_to_history(text):
+    """מוסיף רשומה ל-history.txt עם חותמת זמן ומספר התמלולים המוצלחים היום."""
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     sep_thick = "=" * 64
     sep_thin = "-" * 64
-    # סופרים כמה בקשות היו היום *לפני* הוספת הרשומה הנוכחית, ואז +1
+    # סופרים כמה תמלולים מוצלחים היו היום *לפני* הוספת הרשומה הנוכחית, ואז +1
     used_today = count_today_usage() + 1
-    usage_line = f"Request {used_today} / {DAILY_LIMIT} today"
+    usage_line = f"Transcription #{used_today} today"
     entry = f"{sep_thick}\n{timestamp}  |  {usage_line}\n{sep_thin}\n{text}\n"
     try:
         with open(HISTORY_FILE, "a", encoding="utf-8") as f:
@@ -236,6 +473,7 @@ def append_to_history(text):
 
 
 def copy_to_clipboard(text):
+    """מעתיק טקסט ל-clipboard (CLI בלבד; ה-tray מטפל בהדבקה עצמאית)."""
     try:
         import pyperclip
     except ImportError:
@@ -262,13 +500,20 @@ def main():
         cleanup_path = audio_path
 
     try:
-        text = transcribe_audio(audio_path)
+        try:
+            result = transcribe_with_fallback(audio_path)
+            text = result["text"]
+            print(f"(used model: {result['model_used']})")
+        except TranscriptionError as e:
+            print(f"ERROR: {type(e).__name__}: {e}")
+            sys.exit(1)
+
         save_output(text)
         append_to_history(text)
         copy_to_clipboard(text)
 
         used = count_today_usage()
-        print(f"Daily usage: {used} / {DAILY_LIMIT} requests today.")
+        print(f"Transcriptions today: {used}")
 
     finally:
         if cleanup_path and os.path.exists(cleanup_path):

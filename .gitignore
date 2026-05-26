@@ -8,8 +8,11 @@ output.txt
 history.txt
 settings.json
 
-# --- אייקון שנוצר אוטומטית ---
-tamlel.ico
+# --- הקלטות שנכשלו (לטיפול ידני אחר כך) ---
+failed_recordings/
+
+# --- לוג ריצה ---
+app.log
 
 # --- קבצי אודיו (לא להעלות הקלטות) ---
 *.wav
