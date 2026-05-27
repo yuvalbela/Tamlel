@@ -115,14 +115,15 @@ Advanced → Run as administrator.
 - `mode` — ניתן לשנות גם דרך תפריט ה-tray.
 - `models` — שרשרת fallback של מודלי Gemini. ברירת מחדל:
   ```json
-  ["gemini-3.5-flash", "gemini-3-flash-preview", "gemini-2.5-flash",
-   "gemini-2.0-flash", "gemini-3.1-flash-lite"]
+  ["gemini-3.5-flash", "gemini-3-flash-preview",
+   "gemini-2.5-flash", "gemini-3.1-flash-lite",
+   "gemini-2.5-flash-lite"]
   ```
-  הסדר: מהחדש (סטטיסטית - איכותי יותר) ליציב המוכר, ואז ל-lite לכמויות.
-  ארבעת ה-flash הראשונים: 20 RPD כל אחד (כל אחד עם מונה quota נפרד) =
-  80 בקשות איכותיות ביום. כש**כולם** נגמרים → fallback ל-
-  `gemini-3.1-flash-lite` שיש לו 500 RPD (איכות סבירה, workhorse לכמויות).
-  סה"כ ~580 בקשות ביום.
+  הסדר: מהחדש (סטטיסטית - איכותי יותר) ליציב המוכר, ל-lite לכמויות, ולסיום
+  עוד lite כרשת ביטחון. שלושת ה-flash הראשונים: 20 RPD כל אחד = 60 בקשות
+  איכותיות ביום. `gemini-3.1-flash-lite` עם 500 RPD משמש workhorse לכמויות.
+  `gemini-2.5-flash-lite` (20 RPD) בסוף מטפל במקרה שה-3.1-lite במצב תקלת
+  שרת זמנית. סה"כ ~580 בקשות ביום.
 
   `gemini-3-flash-preview` הוא גרסת preview של דור 3 — שווה ניסיון לאיכות
   עדיפה, אבל preview עלול להשתנות או להיעלם. אם זה קורה, ה-chain פשוט

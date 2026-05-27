@@ -28,10 +28,10 @@ except ImportError:
 # סה"כ 60 בקשות איכותיות + 500 lite = 560 ביום.
 DEFAULT_MODELS = [
     "gemini-3.5-flash",        # 20 RPD, הכי חדש ויציב
-    "gemini-3-flash-preview",  # 20 RPD, preview של דור 3 (יבחן בשימוש)
+    "gemini-3-flash-preview",  # 20 RPD, preview של דור 3
     "gemini-2.5-flash",        # 20 RPD, יציב ומוכח
-    "gemini-2.0-flash",        # 20 RPD, יציב, דור קודם
     "gemini-3.1-flash-lite",   # 500 RPD, workhorse לכמויות
+    "gemini-2.5-flash-lite",   # 20 RPD, רשת ביטחון אחרונה אם 3.1-lite במצב תקול
 ]
 # המודל הראשון בשרשרת - נקודת התחלה כברירת מחדל ל-transcribe_audio()
 MODEL = DEFAULT_MODELS[0]

@@ -278,22 +278,29 @@ def _on_retry(event_type, model, attempt, exc, wait_sec):
     # giving_up מטופל במקום אחר
 
 
-def do_transcribe_flow(audio_path, duration, rms):
+def do_transcribe_flow(audio_path, duration, rms, is_retry=False):
+    """is_retry=True משמש כשמפעילים מחדש הקלטה שמורה מ-failed_recordings/.
+    במצב זה: מדלגים על בדיקות duration/rms, ולא מוחקים את הקובץ אם
+    התמלול נכשל שוב (משאירים לניסיון נוסף)."""
     state.is_processing = True
     # מצבים אפשריים: "idle" (חזרה לירוק), "error" (כתום - מנוהל ע"י _flash_error_icon)
     final_state = "idle"
+    succeeded = False
     try:
         state.icon.icon = ICON_PROCESSING
-        state.icon.title = "Tamlel - processing..."
+        state.icon.title = ("Tamlel - retrying..." if is_retry
+                            else "Tamlel - processing...")
 
-        print(f"Recorded {duration:.1f}s, RMS={rms:.0f}")
-
-        if duration < MIN_RECORDING_SEC:
-            print(f"WARNING: recording too short ({duration:.2f}s), skipping.")
-            return
-        if rms < 50:
-            print("WARNING: audio very quiet, skipping.")
-            return
+        if is_retry:
+            print(f"Retrying failed recording: {audio_path}")
+        else:
+            print(f"Recorded {duration:.1f}s, RMS={rms:.0f}")
+            if duration < MIN_RECORDING_SEC:
+                print(f"WARNING: recording too short ({duration:.2f}s), skipping.")
+                return
+            if rms < 50:
+                print("WARNING: audio very quiet, skipping.")
+                return
 
         models = SETTINGS.get("models") or DEFAULT_MODELS
         try:
@@ -314,9 +321,14 @@ def do_transcribe_flow(audio_path, duration, rms):
             return
         except TranscriptionError as e:
             print(f"TRANSCRIPTION FAILED: {type(e).__name__}: {e}")
-            saved_to = _save_failed_recording(audio_path)
-            audio_path = None  # מסמן שאל תנסה למחוק שוב
-            note = (f" Saved to {saved_to}" if saved_to else "")
+            if not is_retry:
+                # במצב רגיל - שומרים את ההקלטה בתיקיית failed_recordings
+                saved_to = _save_failed_recording(audio_path)
+                audio_path = None  # מסמן שאל תנסה למחוק שוב
+                note = (f" Saved to {saved_to}" if saved_to else "")
+            else:
+                # במצב retry הקובץ כבר בתוך failed_recordings/, משאירים אותו
+                note = " (kept in failed_recordings/ for another retry)"
             _notify("Tamlel — Transcription failed",
                     f"Gemini unavailable after retries.{note}")
             _flash_error_icon()
@@ -358,6 +370,7 @@ def do_transcribe_flow(audio_path, duration, rms):
         used = count_today_usage()
         print(f"Done. Transcriptions today: {used}")
         state.icon.title = f"Tamlel - {used} transcriptions today"
+        succeeded = True
 
     except Exception as e:
         print(f"ERROR in transcribe flow: {type(e).__name__}: {e}")
@@ -368,8 +381,13 @@ def do_transcribe_flow(audio_path, duration, rms):
         if state.overlay is not None:
             state.overlay.hide()
 
-        # ניקוי קובץ זמני (אלא אם נשמר ב-failed_recordings - אז audio_path = None)
-        if audio_path:
+        # ניקוי קובץ אודיו:
+        # - מצב רגיל: תמיד מנקים (TranscriptionError מאפס את audio_path אחרי
+        #   שהקובץ הועבר ל-failed_recordings, אז זה skip יחיד).
+        # - מצב retry: מוחקים מ-failed_recordings רק אם הצלחנו. אחרת הקובץ
+        #   נשאר שם לניסיון נוסף.
+        should_delete = audio_path and (succeeded if is_retry else True)
+        if should_delete:
             try:
                 if os.path.exists(audio_path):
                     os.remove(audio_path)
@@ -658,6 +676,84 @@ def copy_last_enabled(_item):
     return _cached_last_transcription() is not None
 
 
+def _find_latest_failed_recording():
+    """מחזיר את הנתיב להקלטה הנכשלת האחרונה (לפי mtime), או None."""
+    if not os.path.isdir(FAILED_RECORDINGS_DIR):
+        return None
+    candidates = []
+    try:
+        for name in os.listdir(FAILED_RECORDINGS_DIR):
+            if name.lower().endswith(".wav"):
+                p = os.path.join(FAILED_RECORDINGS_DIR, name)
+                if os.path.isfile(p):
+                    candidates.append((os.path.getmtime(p), p))
+    except OSError:
+        return None
+    if not candidates:
+        return None
+    candidates.sort(reverse=True)
+    return candidates[0][1]
+
+
+# Cache קצר כדי שלא נסרוק את התיקייה פעמיים בכל פתיחת תפריט.
+_LATEST_FAILED_CACHE_TTL_SEC = 0.5
+_latest_failed_cache = {"path": None, "expires_at": 0.0}
+
+
+def _cached_latest_failed():
+    now = time.monotonic()
+    if now < _latest_failed_cache["expires_at"]:
+        return _latest_failed_cache["path"]
+    path = _find_latest_failed_recording()
+    _latest_failed_cache["path"] = path
+    _latest_failed_cache["expires_at"] = now + _LATEST_FAILED_CACHE_TTL_SEC
+    return path
+
+
+def retry_failed_text(_item):
+    path = _cached_latest_failed()
+    if path is None:
+        return "Retry last failed (none)"
+    # שם הקובץ: recording_2026-05-27_12-28-59.wav → מציגים 12:28:59
+    name = os.path.basename(path)
+    try:
+        stamp = name.replace("recording_", "").replace(".wav", "")
+        _date_part, _, time_part = stamp.partition("_")
+        return f"Retry last failed: {time_part.replace('-', ':')}"
+    except Exception:
+        return f"Retry last failed: {name}"
+
+
+def retry_failed_enabled(_item):
+    return _cached_latest_failed() is not None
+
+
+def on_retry_failed(icon, _item):
+    """מנסה לתמלל מחדש את ההקלטה הנכשלת האחרונה. רץ ב-thread נפרד כדי לא
+    לחסום את ה-tray. אם quotas של מודלים התאוששו - זה בדרך כלל יעבוד."""
+    if state.is_processing:
+        _notify("Tamlel", "Already processing — try again in a moment")
+        return
+    path = _find_latest_failed_recording()
+    if not path:
+        _notify("Tamlel", "No failed recordings to retry")
+        return
+    print(f"Retrying failed recording on user request: {path}")
+
+    # שחרור הסט של מודלים שהתראנו עליהם כדי שטוסטים יופיעו שוב בריצה הזו
+    state.notified_fallbacks.clear()
+
+    # מציגים את הפיל מיד במצב processing (בלי הקלטה)
+    if state.overlay is not None:
+        state.overlay.show_processing()
+
+    def runner():
+        # is_retry=True מדלג על בדיקות duration/rms ומשאיר את הקובץ אם נכשל
+        do_transcribe_flow(path, duration=0.0, rms=0.0, is_retry=True)
+
+    threading.Thread(target=runner, daemon=True).start()
+
+
 def on_quit(icon, _item):
     print("Quitting...")
     icon.stop()
@@ -672,6 +768,7 @@ def build_menu():
         MenuItem(hotkey_text, lambda *_: None, enabled=False),
         Menu.SEPARATOR,
         MenuItem(copy_last_text, on_copy_last, enabled=copy_last_enabled),
+        MenuItem(retry_failed_text, on_retry_failed, enabled=retry_failed_enabled),
         MenuItem(mode_text, toggle_mode),
         Menu.SEPARATOR,
         MenuItem("Clear history and log", on_clear_data),
