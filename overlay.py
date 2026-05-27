@@ -80,9 +80,10 @@ def _get_active_monitor_workarea():
 # ---------- חלון ה-overlay ----------
 class RecordingOverlay:
     NUM_BARS = 14
-    BAR_WIDTH = 2
-    BAR_GAP = 3
-    BAR_MIN_HEIGHT = 2
+    BAR_WIDTH = 3       # ברוחב 2 כמעט לא רואים את הקצוות העגולים ב-tkinter;
+                         # 3 פיקסלים זה המינימום שבו ה-capstyle=ROUND ניכר.
+    BAR_GAP = 2          # הוקטן כדי לשמור על אותו רוחב פיל כולל.
+    BAR_MIN_HEIGHT = 3   # ≥ BAR_WIDTH כדי שגם במצב הכי שטוח יראו עיגול מלא.
     BAR_COLOR = "#ffffff"
 
     PILL_FILL_COLOR = "#1a1a1a"     # מילוי כהה שייראה על כל רקע
@@ -301,24 +302,33 @@ class RecordingOverlay:
         self.canvas.tag_lower("pill")
 
     def _create_bars(self):
+        """כל בר הוא create_line בודד עם capstyle='round' - tkinter מטפל
+        בקצוות העגולים native, ואין בעיית יישור בין חצאי-עיגול למלבן.
+        כשגובה הבר ≤ רוחבו, הוא נראה כעיגול קטן."""
         cy = self.height // 2
         self.bars = []
         for x0, x1 in self._bar_positions:
-            bar_id = self.canvas.create_rectangle(
-                x0, cy - 1, x1, cy + 1,
-                fill=self.BAR_COLOR, outline="",
+            bw = x1 - x0
+            cx_pos = (x0 + x1) / 2
+            # נקודת התחלה: מינימום (cy) - האנימציה תמתח אותו
+            bar_id = self.canvas.create_line(
+                cx_pos, cy, cx_pos, cy,
+                fill=self.BAR_COLOR, width=bw,
+                capstyle=tk.ROUND,
             )
-            self.bars.append((bar_id, x0, x1))
+            self.bars.append({
+                "id": bar_id, "x0": x0, "x1": x1, "cx": cx_pos, "bw": bw,
+            })
 
     def _apply_bar_layout(self, mode):
-        """מחביא/מציג ברים לפי המצב. מיקום הברים עצמם לא משתנה - רק אילו מוצגים."""
+        """מחביא/מציג ברים לפי המצב."""
         if mode == "processing":
             visible = self._num_bars_visible_processing
         else:
             visible = self.NUM_BARS
-        for i, (bar_id, _, _) in enumerate(self.bars):
+        for i, bar in enumerate(self.bars):
             state = "normal" if i < visible else "hidden"
-            self.canvas.itemconfigure(bar_id, state=state)
+            self.canvas.itemconfigure(bar["id"], state=state)
 
     def _create_spinner(self):
         """יוצר את קשת הספינר. מוסתרת בתחילה (מצב recording)."""
@@ -410,8 +420,8 @@ class RecordingOverlay:
     def _hide_dynamic_items(self):
         """מסתיר ברים + ספינר. שימושי במהלך אנימציית פתיחה/סגירה - רק הפיל
         עצמו רואים אז."""
-        for bar_id, _, _ in self.bars:
-            self.canvas.itemconfigure(bar_id, state="hidden")
+        for bar in self.bars:
+            self.canvas.itemconfigure(bar["id"], state="hidden")
         self.canvas.itemconfigure(self._spinner_id, state="hidden")
 
     def _animate_geometry(self, start, end, duration_ms, easing, on_done):
@@ -536,10 +546,15 @@ class RecordingOverlay:
             self.current_height[i] += (target_h - self.current_height[i]) * self.SMOOTHING
             h = max(min_h, self.current_height[i])
 
-            bar_id, x0, x1 = self.bars[i]
-            y0 = cy - h / 2
-            y1 = cy + h / 2
-            self.canvas.coords(bar_id, x0, y0, x1, y1)
+            bar = self.bars[i]
+            cx_pos = bar["cx"]
+            bw = bar["bw"]
+            # capstyle='round' מוסיף חצי-עיגול בקצה הקו - לכן אורך הקו
+            # האמיתי הוא h-bw (הקצוות העגולים מוסיפים bw/2 בכל קצה).
+            line_len = max(0, h - bw)
+            y0 = cy - line_len / 2
+            y1 = cy + line_len / 2
+            self.canvas.coords(bar["id"], cx_pos, y0, cx_pos, y1)
 
         # סיבוב הספינר רק במצב processing
         if self._mode == "processing":

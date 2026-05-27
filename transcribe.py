@@ -27,10 +27,11 @@ except ImportError:
 # הסדר: מהחדש ביותר (סטטיסטית - איכותי יותר) ליציב המוכר, ואז ל-lite לכמויות.
 # סה"כ 60 בקשות איכותיות + 500 lite = 560 ביום.
 DEFAULT_MODELS = [
-    "gemini-3.5-flash",      # 20 RPD, הכי חדש
-    "gemini-3.0-flash",      # 20 RPD
-    "gemini-2.5-flash",      # 20 RPD, יציב ומוכח
-    "gemini-3.1-flash-lite", # 500 RPD, איכות סבירה (workhorse לכמויות)
+    "gemini-3.5-flash",        # 20 RPD, הכי חדש ויציב
+    "gemini-3-flash-preview",  # 20 RPD, preview של דור 3 (יבחן בשימוש)
+    "gemini-2.5-flash",        # 20 RPD, יציב ומוכח
+    "gemini-2.0-flash",        # 20 RPD, יציב, דור קודם
+    "gemini-3.1-flash-lite",   # 500 RPD, workhorse לכמויות
 ]
 # המודל הראשון בשרשרת - נקודת התחלה כברירת מחדל ל-transcribe_audio()
 MODEL = DEFAULT_MODELS[0]
@@ -210,6 +211,10 @@ class TranscriptionEmptyResponseError(TranscriptionError):
     """Gemini החזיר תשובה ריקה (אודיו שקט, נחסם, וכד')."""
 
 
+class TranscriptionModelNotFoundError(TranscriptionError):
+    """404 - שם המודל לא קיים/לא נתמך. fallback למודל הבא בשרשרת."""
+
+
 class TranscriptionFatalError(TranscriptionError):
     """שגיאה אחרת שלא תיפתר מעצמה (לא retry)."""
 
@@ -230,7 +235,7 @@ def _classify_429(msg):
 
 def _classify_error(exc):
     """מסווג חריגה מ-genai לקטגוריית שגיאה. מחזיר אחת מ:
-    'server', 'rate', 'quota', 'auth', 'unknown'."""
+    'server', 'rate', 'quota', 'auth', 'not_found', 'unknown'."""
     code = getattr(exc, "code", None) or getattr(exc, "status_code", None)
     msg = str(exc).lower()
 
@@ -241,6 +246,8 @@ def _classify_error(exc):
         return _classify_429(msg)
     if code in (401, 403):
         return "auth"
+    if code == 404:
+        return "not_found"
 
     # סיווג לפי הודעת השגיאה
     if any(c in msg for c in ("503", "500", "502", "504", "unavailable", "internal server")):
@@ -249,6 +256,8 @@ def _classify_error(exc):
         return _classify_429(msg)
     if any(s in msg for s in ("401", "403", "unauthorized", "permission denied", "api_key")):
         return "auth"
+    if "404" in msg or "not_found" in msg or "is not found" in msg:
+        return "not_found"
     return "unknown"
 
 
@@ -306,6 +315,8 @@ def transcribe_audio(audio_path, model=MODEL):
             raise TranscriptionQuotaError(msg) from e
         if category == "auth":
             raise TranscriptionAuthError(msg) from e
+        if category == "not_found":
+            raise TranscriptionModelNotFoundError(msg) from e
         raise TranscriptionFatalError(msg) from e
 
     elapsed = time.time() - start
@@ -404,6 +415,18 @@ def transcribe_with_fallback(audio_path, models=None,
                     if on_retry:
                         on_retry("fallback", next_model, attempt, e, 0)
                 break  # exit retry loop, go to next model
+
+            except TranscriptionModelNotFoundError as e:
+                # שם המודל לא קיים/לא נתמך - אין טעם ב-retry, עוברים מיד הלאה.
+                # זה מגן מטעויות קלות בשם של מודל ב-settings.json.
+                last_error = e
+                print(f"  Model '{model}' not found/supported: {e}")
+                if not is_last_model:
+                    next_model = models[model_index + 1]
+                    print(f"  Falling back to: {next_model}")
+                    if on_retry:
+                        on_retry("fallback", next_model, attempt, e, 0)
+                break
 
             except TranscriptionEmptyResponseError as e:
                 # תשובה ריקה או hallucination - לא להפעיל retry על אותו מודל,
