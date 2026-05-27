@@ -504,32 +504,45 @@ def read_last_transcription():
         ---- thin separator (64 chars) ----
         <text - יכול לתפוס מספר שורות>
 
-    הרשומה האחרונה היא הבלוק האחרון אחרי ה-thick separator האחרון."""
+    Tail-read: רוב הזמן הרשומה האחרונה היא 200-2000 תווים, אז נקרא רק את
+    סוף הקובץ. אם לא נמצא separator (רשומה ענקית) - נכפיל את הקריאה עד שנמצא,
+    או עד שהגענו לתחילת הקובץ."""
     if not os.path.isfile(HISTORY_FILE):
-        return None
-    try:
-        with open(HISTORY_FILE, "r", encoding="utf-8") as f:
-            content = f.read()
-    except OSError as e:
-        print(f"WARNING: could not read history: {e}")
         return None
 
     sep_thick = "=" * 64
     sep_thin = "-" * 64
 
-    parts = content.split(sep_thick)
-    # parts[0] - מה שלפני ה-separator הראשון (בד"כ ריק)
-    # parts[-1] - הרשומה האחרונה (אחרי הקו העבה האחרון)
-    if len(parts) < 2:
+    try:
+        file_size = os.path.getsize(HISTORY_FILE)
+        if file_size == 0:
+            return None
+        # מנסים tail בגדלים גדלים והולכים: 8KB → 64KB → 512KB → כל הקובץ
+        for tail_size in (8 * 1024, 64 * 1024, 512 * 1024, file_size):
+            read_size = min(tail_size, file_size)
+            with open(HISTORY_FILE, "rb") as f:
+                f.seek(file_size - read_size)
+                raw = f.read()
+            # מפענחים עם errors='ignore' למקרה שחתכנו באמצע תו multibyte
+            content = raw.decode("utf-8", errors="ignore")
+            # נדרשים *לפחות* separator אחד; כדי שנהיה בטוחים שתפסנו רשומה
+            # שלמה ולא חצי, נדרשים *שניים* (תחילת רשומה + תחילת קודמת)
+            # או שהגענו לתחילת הקובץ.
+            if content.count(sep_thick) >= 2 or read_size >= file_size:
+                break
+        parts = content.split(sep_thick)
+        if len(parts) < 2:
+            return None
+        last_block = parts[-1]
+        if sep_thin in last_block:
+            _header, _, body = last_block.partition(sep_thin)
+            text = body.strip("\n")
+        else:
+            text = last_block.strip("\n")
+        return text or None
+    except OSError as e:
+        print(f"WARNING: could not read history: {e}")
         return None
-    last_block = parts[-1]
-    # פיצול על הקו הדק כדי לדלג על שורת ה-timestamp
-    if sep_thin in last_block:
-        _header, _, body = last_block.partition(sep_thin)
-        text = body.strip("\n")
-    else:
-        text = last_block.strip("\n")
-    return text or None
 
 
 def copy_to_clipboard(text):

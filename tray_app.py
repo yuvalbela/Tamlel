@@ -101,13 +101,15 @@ DEFAULT_SETTINGS = {
     "models": DEFAULT_MODELS,  # שרשרת fallback
 }
 PASTE_DELAY_SEC = 0.5
-# כמה להמתין אחרי ctrl+v לפני שחזור הקליפבורד המקורי - שיהיה מספיק זמן לאפליקציית
-# היעד לקרוא את הטקסט שלנו מהקליפבורד.
-CLIPBOARD_RESTORE_DELAY_SEC = 0.4
+# כמה להמתין אחרי ctrl+v לפני שחזור הקליפבורד המקורי. 200ms מספיקים לכל
+# אפליקציה מודרנית לקרוא את הקליפבורד אחרי ctrl+v - המשתמש מרגיש את זה
+# כסיום מהיר יותר של ה-flow.
+CLIPBOARD_RESTORE_DELAY_SEC = 0.2
 MIN_RECORDING_SEC = 0.3  # הקלטה קצרה מזה תיחשב כקליק בטעות
 HOLD_POLL_INTERVAL = 0.03  # תדירות בדיקה אם ה-hotkey עוד לחוץ ב-hold mode
 ERROR_ICON_FLASH_SEC = 8  # כמה זמן האייקון נשאר כתום אחרי כשל
 FAILED_RECORDINGS_DIR = "failed_recordings"
+FAILED_RECORDINGS_KEEP_DAYS = 14  # מחיקה אוטומטית של הקלטות נכשלות ישנות
 
 # ---------- ספריות חיצוניות ----------
 try:
@@ -607,10 +609,26 @@ def on_clear_data(icon, _item):
         pass
 
 
+# Cache קצר של תוצאת read_last_transcription. pystray קורא לתוויות (callable
+# label, callable enabled) בכל פתיחת תפריט - בלי cache היו 2+ קריאות מהדיסק.
+_LAST_TXN_CACHE_TTL_SEC = 0.5
+_last_txn_cache = {"text": None, "expires_at": 0.0}
+
+
+def _cached_last_transcription():
+    now = time.monotonic()
+    if now < _last_txn_cache["expires_at"]:
+        return _last_txn_cache["text"]
+    text = read_last_transcription()
+    _last_txn_cache["text"] = text
+    _last_txn_cache["expires_at"] = now + _LAST_TXN_CACHE_TTL_SEC
+    return text
+
+
 def on_copy_last(icon, _item):
     """מעתיק את התמלול האחרון מ-history.txt לקליפבורד. עובד גם בין סשנים -
     אם סגרת והפעלת את האפליקציה מחדש, התמלול האחרון נטען מהקובץ."""
-    text = read_last_transcription()
+    text = _cached_last_transcription()
     if not text:
         _notify("Tamlel", "No transcription in history yet")
         return
@@ -627,7 +645,7 @@ def on_copy_last(icon, _item):
 
 def copy_last_text(_item):
     """תווית התפריט - מציגה תצוגה מקדימה קצרה מ-history.txt."""
-    text = read_last_transcription()
+    text = _cached_last_transcription()
     if not text:
         return "Copy last transcription (none yet)"
     snippet = text[:30].replace("\n", " ")
@@ -637,7 +655,7 @@ def copy_last_text(_item):
 
 
 def copy_last_enabled(_item):
-    return read_last_transcription() is not None
+    return _cached_last_transcription() is not None
 
 
 def on_quit(icon, _item):
@@ -661,6 +679,28 @@ def build_menu():
     )
 
 
+def _cleanup_old_failed_recordings():
+    """מוחק קבצים בתיקיית failed_recordings/ ישנים מ-FAILED_RECORDINGS_KEEP_DAYS
+    ימים. רץ פעם אחת בעלייה של האפליקציה - הצטברות של חודשים של הקלטות
+    נכשלות עלולה לתפוס דיסק (כל אחת ~0.5 MB)."""
+    if not os.path.isdir(FAILED_RECORDINGS_DIR):
+        return
+    cutoff = time.time() - FAILED_RECORDINGS_KEEP_DAYS * 24 * 3600
+    deleted = 0
+    for name in os.listdir(FAILED_RECORDINGS_DIR):
+        path = os.path.join(FAILED_RECORDINGS_DIR, name)
+        try:
+            if os.path.isfile(path) and os.path.getmtime(path) < cutoff:
+                os.remove(path)
+                deleted += 1
+        except OSError as e:
+            print(f"  Could not check/delete {path}: {e}")
+    if deleted:
+        print(f"Cleanup: removed {deleted} failed recording"
+              f"{'s' if deleted != 1 else ''} older than "
+              f"{FAILED_RECORDINGS_KEEP_DAYS} days.")
+
+
 # ---------- רישום קיצורים ----------
 def register_hotkeys():
     try:
@@ -673,6 +713,7 @@ def register_hotkeys():
 
 
 def main():
+    _cleanup_old_failed_recordings()
     register_hotkeys()
     print(f"Tamlel running. Hotkey: {SETTINGS['hotkey']}, mode: {SETTINGS['mode']}")
     print("Right-click the tray icon for menu (current model, mode toggle, quit).")
