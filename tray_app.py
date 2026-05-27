@@ -84,6 +84,7 @@ from transcribe import (
     save_output,
     append_to_history,
     count_today_usage,
+    read_last_transcription,
     HISTORY_FILE,
     DEFAULT_MODELS,
     TranscriptionError,
@@ -100,6 +101,9 @@ DEFAULT_SETTINGS = {
     "models": DEFAULT_MODELS,  # שרשרת fallback
 }
 PASTE_DELAY_SEC = 0.5
+# כמה להמתין אחרי ctrl+v לפני שחזור הקליפבורד המקורי - שיהיה מספיק זמן לאפליקציית
+# היעד לקרוא את הטקסט שלנו מהקליפבורד.
+CLIPBOARD_RESTORE_DELAY_SEC = 0.4
 MIN_RECORDING_SEC = 0.3  # הקלטה קצרה מזה תיחשב כקליק בטעות
 HOLD_POLL_INTERVAL = 0.03  # תדירות בדיקה אם ה-hotkey עוד לחוץ ב-hold mode
 ERROR_ICON_FLASH_SEC = 8  # כמה זמן האייקון נשאר כתום אחרי כשל
@@ -324,12 +328,30 @@ def do_transcribe_flow(audio_path, duration, rms):
         save_output(text)
         append_to_history(text)
 
+        # שומרים את הקליפבורד המקורי (טקסט בלבד; אם הוא לא היה טקסט, pyperclip
+        # מחזיר ""), כדי לשחזר אחרי ה-paste בלי לדרוס מה שהמשתמש העתיק.
+        try:
+            original_clipboard = pyperclip.paste()
+        except Exception as e:
+            print(f"  Could not read original clipboard: {e}")
+            original_clipboard = None
+
         pyperclip.copy(text)
         # שחרור מפורש של המודיפיירים שלוחצו ב-hotkey, כדי שה-Ctrl+V לא יתפרש
         # כקומבינציה משונה עם המודיפיירים שעוד "פתוחים" במערכת.
         _release_hotkey_modifiers()
         time.sleep(PASTE_DELAY_SEC)
         keyboard.send("ctrl+v")
+
+        # ממתינים שההדבקה תתבצע באפליקציית היעד לפני שמשחזרים את הקליפבורד.
+        # אם משחזרים מוקדם מדי - הקליפבורד יתחלף עוד לפני שהיעד קרא אותו והדבקה
+        # תיכשל / תדביק את התוכן הישן.
+        time.sleep(CLIPBOARD_RESTORE_DELAY_SEC)
+        if original_clipboard is not None:
+            try:
+                pyperclip.copy(original_clipboard)
+            except Exception as e:
+                print(f"  Could not restore clipboard: {e}")
 
         used = count_today_usage()
         print(f"Done. Transcriptions today: {used}")
@@ -498,18 +520,36 @@ def toggle_mode(icon, _item):
 
 
 def _confirm_dialog(title, message):
-    """דיאלוג Yes/No מודאלי של Windows. מחזיר True אם המשתמש לחץ Yes."""
+    """דיאלוג Yes/No מודאלי של Windows. מחזיר True אם המשתמש לחץ Yes.
+
+    חשוב: המסך הזה חייב לרוץ ב-thread חדש משלו ולא ב-thread של ה-tray icon.
+    pystray מנהל message pump משלו על אותו thread, ו-MessageBox מנהל message
+    pump משלו - שני pumps על אותו thread → קפיאה (הכפתורים, ה-X, הכל לא
+    מגיב). אז כאן יוצרים thread חדש, מריצים שם את הדיאלוג עם message pump
+    שלו, וממתינים לתוצאה בעזרת Event.
+    """
     MB_YESNO = 0x4
     MB_ICONWARNING = 0x30
+    MB_SETFOREGROUND = 0x10000
+    MB_TOPMOST = 0x40000
     IDYES = 6
-    try:
-        result = ctypes.windll.user32.MessageBoxW(
-            0, message, title, MB_YESNO | MB_ICONWARNING
-        )
-        return result == IDYES
-    except Exception as e:
-        print(f"WARNING: could not show confirmation dialog: {e}")
-        return False
+    flags = MB_YESNO | MB_ICONWARNING | MB_SETFOREGROUND | MB_TOPMOST
+
+    result = {"value": False}
+    done = threading.Event()
+
+    def show():
+        try:
+            r = ctypes.windll.user32.MessageBoxW(0, message, title, flags)
+            result["value"] = (r == IDYES)
+        except Exception as e:
+            print(f"WARNING: could not show confirmation dialog: {e}")
+        finally:
+            done.set()
+
+    threading.Thread(target=show, daemon=True).start()
+    done.wait()
+    return result["value"]
 
 
 def on_clear_data(icon, _item):
@@ -567,6 +607,39 @@ def on_clear_data(icon, _item):
         pass
 
 
+def on_copy_last(icon, _item):
+    """מעתיק את התמלול האחרון מ-history.txt לקליפבורד. עובד גם בין סשנים -
+    אם סגרת והפעלת את האפליקציה מחדש, התמלול האחרון נטען מהקובץ."""
+    text = read_last_transcription()
+    if not text:
+        _notify("Tamlel", "No transcription in history yet")
+        return
+    try:
+        pyperclip.copy(text)
+        preview = text[:40].replace("\n", " ")
+        if len(text) > 40:
+            preview += "..."
+        _notify("Tamlel", f"Copied: {preview}")
+    except Exception as e:
+        print(f"WARNING: could not copy last transcription: {e}")
+        _notify("Tamlel", f"Copy failed: {e}")
+
+
+def copy_last_text(_item):
+    """תווית התפריט - מציגה תצוגה מקדימה קצרה מ-history.txt."""
+    text = read_last_transcription()
+    if not text:
+        return "Copy last transcription (none yet)"
+    snippet = text[:30].replace("\n", " ")
+    if len(text) > 30:
+        snippet += "..."
+    return f'Copy last: "{snippet}"'
+
+
+def copy_last_enabled(_item):
+    return read_last_transcription() is not None
+
+
 def on_quit(icon, _item):
     print("Quitting...")
     icon.stop()
@@ -580,6 +653,7 @@ def build_menu():
         MenuItem(current_model_text, lambda *_: None, enabled=False),
         MenuItem(hotkey_text, lambda *_: None, enabled=False),
         Menu.SEPARATOR,
+        MenuItem(copy_last_text, on_copy_last, enabled=copy_last_enabled),
         MenuItem(mode_text, toggle_mode),
         Menu.SEPARATOR,
         MenuItem("Clear history and log", on_clear_data),

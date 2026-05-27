@@ -495,6 +495,43 @@ def append_to_history(text):
         print(f"WARNING: could not write history: {e}")
 
 
+def read_last_transcription():
+    """קורא את הטקסט של התמלול האחרון מ-history.txt. מחזיר None אם אין היסטוריה.
+
+    המבנה של כל רשומה:
+        ==== thick separator (64 chars) ====
+        2026-05-27 12:23:08  |  Transcription #N today
+        ---- thin separator (64 chars) ----
+        <text - יכול לתפוס מספר שורות>
+
+    הרשומה האחרונה היא הבלוק האחרון אחרי ה-thick separator האחרון."""
+    if not os.path.isfile(HISTORY_FILE):
+        return None
+    try:
+        with open(HISTORY_FILE, "r", encoding="utf-8") as f:
+            content = f.read()
+    except OSError as e:
+        print(f"WARNING: could not read history: {e}")
+        return None
+
+    sep_thick = "=" * 64
+    sep_thin = "-" * 64
+
+    parts = content.split(sep_thick)
+    # parts[0] - מה שלפני ה-separator הראשון (בד"כ ריק)
+    # parts[-1] - הרשומה האחרונה (אחרי הקו העבה האחרון)
+    if len(parts) < 2:
+        return None
+    last_block = parts[-1]
+    # פיצול על הקו הדק כדי לדלג על שורת ה-timestamp
+    if sep_thin in last_block:
+        _header, _, body = last_block.partition(sep_thin)
+        text = body.strip("\n")
+    else:
+        text = last_block.strip("\n")
+    return text or None
+
+
 def copy_to_clipboard(text):
     """מעתיק טקסט ל-clipboard (CLI בלבד; ה-tray מטפל בהדבקה עצמאית)."""
     try:
