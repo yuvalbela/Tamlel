@@ -108,28 +108,15 @@ def draw_pill(d, pw, ph):
 
     ow = max(1, PILL_OUTLINE_WIDTH * S)
 
-    # ---------- מילוי ----------
-    d.ellipse([left * S, top * S, (left + 2 * r) * S, bot * S],
-              fill=PILL_FILL)
-    d.ellipse([(right - 2 * r) * S, top * S, right * S, bot * S],
-              fill=PILL_FILL)
-    if right - r > left + r:
-        d.rectangle([(left + r) * S, top * S, (right - r) * S, bot * S],
-                    fill=PILL_FILL)
-
-    # ---------- outline ----------
-    # PIL: arc הולך CW מ-start ל-end; 0° = שעה 3.
-    # חצי שמאלי: מ-90° (למעלה) ל-270° (למטה) דרך 180° (שמאל)
-    d.arc([left * S, top * S, (left + 2 * r) * S, bot * S],
-          start=90, end=270, fill=PILL_OUTLINE, width=int(ow))
-    # חצי ימני: מ-270° (למטה) ל-90° (למעלה) דרך 0° (ימין)
-    d.arc([(right - 2 * r) * S, top * S, right * S, bot * S],
-          start=270, end=90, fill=PILL_OUTLINE, width=int(ow))
-    if right - r > left + r:
-        d.line([(left + r) * S, top * S, (right - r) * S, top * S],
-               fill=PILL_OUTLINE, width=int(ow))
-        d.line([(left + r) * S, bot * S, (right - r) * S, bot * S],
-               fill=PILL_OUTLINE, width=int(ow))
+    # PIL's rounded_rectangle מצייר פיל שלם בקריאה אחת - מילוי + outline
+    # ביחד, בלי תפר בין קשתות לקווים (זאת היתה הבעיה עם arc+line נפרדים).
+    d.rounded_rectangle(
+        [left * S, top * S, right * S, bot * S],
+        radius=r * S,
+        fill=PILL_FILL,
+        outline=PILL_OUTLINE,
+        width=int(ow),
+    )
 
 
 def draw_bars(d, levels, n_visible):
