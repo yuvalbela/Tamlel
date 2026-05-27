@@ -340,6 +340,10 @@ def do_transcribe_flow(audio_path, duration, rms):
         _flash_error_icon()
         final_state = "error"
     finally:
+        # כעת אפשר להוריד את הפיל - אחרי שהטקסט הודבק (או אחרי שגיאה)
+        if state.overlay is not None:
+            state.overlay.hide()
+
         # ניקוי קובץ זמני (אלא אם נשמר ב-failed_recordings - אז audio_path = None)
         if audio_path:
             try:
@@ -377,13 +381,15 @@ def start_recording():
         result = record_until_event(state.stop_event, on_chunk_rms=on_chunk)
         with state.lock:
             state.is_recording = False
-        # סוגרים את ה-overlay ברגע שההקלטה נגמרת (לפני התמלול)
-        if state.overlay is not None:
-            state.overlay.hide()
         if result is None:
             print("ERROR: no audio captured.")
+            if state.overlay is not None:
+                state.overlay.hide()
             state.icon.icon = ICON_IDLE
             return
+        # ההקלטה הסתיימה: עוברים את הפיל למצב ספינר (לא מסתירים עדיין)
+        if state.overlay is not None:
+            state.overlay.show_processing()
         do_transcribe_flow(result["path"], result["duration"], result["rms"])
 
     threading.Thread(target=runner, daemon=True).start()
